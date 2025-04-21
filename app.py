@@ -18,6 +18,8 @@ from dotenv import load_dotenv
 import google.generativeai as genai  # best practice name
 import google.api_core.exceptions as palm_exceptions  # Make sure this is at the top
 import random
+import time
+from google.api_core.exceptions import ResourceExhausted
 
 model = genai.GenerativeModel('gemini-1.5-flash-002')
 load_dotenv()  # Automatically loads .env from the project root
@@ -122,13 +124,15 @@ def quiz():
             return f"<p>Error generating quiz: {str(e)}</p>"
 
     elif request.method == "GET":
+        print("GET request received")  # Debugging statement
         score = 0
         actual_answers = []
         given_answers = []
 
         # Extract answers from query parameters
         for key in sorted(request.args.keys()):
-            given_answers.append(request.args[key].strip())  # Strip whitespace
+            if key.startswith('question_'):
+                given_answers.append(request.args[key].strip())  # Strip whitespace
 
         res = session.get('response', None)
         if not res:
@@ -137,12 +141,22 @@ def quiz():
         for answer in res["questions"]:
             actual_answers.append(answer["answer"].strip())  # Strip whitespace
 
-        # Compare answers and calculate score
+    # Debugging output
+        print("Given Answers:", given_answers)
+        print("Actual Answers:", actual_answers)
+
+    # Compare answers and calculate score
         if given_answers:
             for i in range(min(len(actual_answers), len(given_answers))):
-                if actual_answers[i].lower() == given_answers[i].lower():  # Case insensitive comparison
+            # Extract the letter from the given answer (e.g., 'B) Firewall' -> 'B')
+                given_answer_letter = given_answers[i].split(')')[0].strip()  # Get the part before the closing parenthesis and strip whitespace
+                if actual_answers[i].lower() == given_answer_letter.lower():  # Case insensitive comparison
                     score += 1
 
+    # Debugging output
+        print("Calculated Score:", score)
+
+    # Return the score and answers to the score template
         return render_template("score.html", actual_answers=actual_answers, given_answers=given_answers, score=score)
 
 @app.route('/signup', methods=['GET', 'POST'])
@@ -376,3 +390,13 @@ if __name__ == "__main__":
     with app.app_context():
         db.create_all()
     app.run(host="127.0.0.1", debug=True)
+
+def generate_content_with_retry(model, content, retries=3):
+    for attempt in range(retries):
+        try:
+            response = model.generate_content(content)
+            return response
+        except ResourceExhausted as e:
+            print(f"Quota exceeded: {e}. Retrying in {33} seconds...")
+            time.sleep(33)  # Wait for the retry delay
+    raise Exception("Max retries exceeded")
