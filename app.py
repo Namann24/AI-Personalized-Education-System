@@ -14,15 +14,22 @@ import json
 import requests
 from flask_weasyprint import HTML, render_pdf
 from weasyprint import CSS
+from dotenv import load_dotenv
+import google.generativeai as genai  # best practice name
+import google.api_core.exceptions as palm_exceptions  # Make sure this is at the top
+import random
+
+model = genai.GenerativeModel('gemini-1.5-flash-002')
+load_dotenv()  # Automatically loads .env from the project root
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'alpha-beta-gamma'
+app.config['SECRET_KEY'] = os.getenv("SECRET_KEY")
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///users.db'
 db = SQLAlchemy(app)
 login_manager = LoginManager()
 login_manager.init_app(app)
-openai.api_key = "YOUR-OPENAI-API-KEY"
-
+openai.api_key = os.getenv("OPENAI_API_KEY")
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
 # Create a Markdown instance with the FencedCodeExtension
 md = markdown.Markdown(extensions=[FencedCodeExtension()])
@@ -66,55 +73,77 @@ def quiz_interface():
 
 @app.route("/quiz", methods=["GET", "POST"])
 def quiz():
-    if (request.method == "POST"):
-        print(request.form)
+    if request.method == "POST":
+        print(request.form)  # Debugging form data
+
         language = request.form["language"]
         questions = request.form["ques"]
         choices = request.form["choices"]
-        #difficulty = request.form["diff"]
 
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {
-                    "role": "system",
-                    "content": f"Hey chat gpt prepare a quick quiz on this programming language: {language} and prepare {questions} number of questions and for each of them keep {choices} number of choices, reply in the form of an object, make sure the response object contains topic, questions array containing question, choices and it's answer,print them in json format"
-                }
-            ],  
-            temperature=0.7,
-        )
-        print(response['choices'][0]['message']['content'])
-        quiz_content = response['choices'][0]['message']['content']
-        #print(quiz_content)
-        
+        # Add randomness to the prompt
+        random_hint = f"(Seed: {random.randint(1000, 9999)}, Time: {datetime.now()})"  # Use datetime directly
 
-        # Convert the content string to a dictionary
-        quiz_content = json.loads(quiz_content)
-        
-        # In your code, session is likely a Flask session object.
-        # Flask provides a session object as a dictionary that you can use to store values that are "remembered" between requests.In this example, session['key'] = 'value' stores a value in the session that can be accessed in subsequent requests.
-        # In your code, session['response'] = response is storing the response dictionary in the session so it can be accessed later, perhaps in a different route or request.
-        session['response'] = quiz_content
-        # app.secret_key = os.environ.get("SECRET_KEY")
+        prompt = f"""
+        Create a quiz on the topic: {language}.
+        Generate {questions} questions, each with {choices} multiple choice options.
+        Try to make the quiz different each time, even for the same topic. {random_hint}
+        Return the quiz in JSON format like this:
+        {{
+          "topic": "Topic Name",
+          "questions": [
+            {{
+              "question": "What is ...?",
+              "choices": ["A", "B", "C", "D"],
+              "answer": "B"
+            }},
+            ...
+          ]
+        }}
+        """
 
-        return render_template("quiz.html", quiz_content=quiz_content)
-    
-    if request.method == "GET":
+        try:
+            response = model.generate_content(prompt)
+
+            # Handle Gemini's markdown response wrapping
+            text_response = response.text.strip()
+
+            if text_response.startswith("```json"):
+                text_response = text_response[7:].strip()
+            if text_response.endswith("```"):
+                text_response = text_response[:-3].strip()
+
+            quiz_content = json.loads(text_response)  # Proper JSON parsing
+
+            session['response'] = quiz_content  # Save quiz data in session
+
+            return render_template("quiz.html", quiz_content=quiz_content)
+
+        except Exception as e:
+            return f"<p>Error generating quiz: {str(e)}</p>"
+
+    elif request.method == "GET":
         score = 0
         actual_answers = []
-        given_answers = list(request.args.values()) or []
+        given_answers = []
+
+        # Extract answers from query parameters
+        for key in sorted(request.args.keys()):
+            given_answers.append(request.args[key].strip())  # Strip whitespace
+
         res = session.get('response', None)
+        if not res:
+            return "<p>No quiz data found. Please generate a quiz first.</p>"
+
         for answer in res["questions"]:
-            actual_answers.append(answer["answer"])
-        if (len(given_answers)!= 0):
-            for i in range(len(actual_answers)):
-                if actual_answers[i] == given_answers[i]:
-                    score=score+1
+            actual_answers.append(answer["answer"].strip())  # Strip whitespace
+
+        # Compare answers and calculate score
+        if given_answers:
+            for i in range(min(len(actual_answers), len(given_answers))):
+                if actual_answers[i].lower() == given_answers[i].lower():  # Case insensitive comparison
+                    score += 1
+
         return render_template("score.html", actual_answers=actual_answers, given_answers=given_answers, score=score)
-
-
-
-
 
 @app.route('/signup', methods=['GET', 'POST'])
 def signup():
@@ -263,107 +292,78 @@ def markdown_to_list(markdown_string):
 
 
 def generate_text(course):
-    palm.configure(api_key="YOUR-API-KEY")
-    models = [
-        m for m in palm.list_models()
-        if 'generateText' in m.supported_generation_methods
-    ]
-    model = models[0].name
     prompts = {
-    'approach': f"You are a pedagogy expert and you are designing a learning material for {course} for an undergrad university student. You have to decide the approach to take for learning from this learning material. Please provide a brief description of the approach you would take to study this learning material (provide in points). After that, please provide a brief description of the learning outcomes that you expect from this learning material.",
-    'modules': f"Based on the course {course}, please provide a list of modules that you would include in the course. Each module should be a subtopic of the course and should be listed in bullet points. Additionally, please provide a brief description of each module to give an overview of the content covered in the module.",
+        'approach': f"You are a pedagogy expert and you are designing a learning material for {course}. Provide a high-level approach to teaching this course effectively, in markdown.",
+        'modules': f"Based on the course {course}, provide a list of modules in markdown bullet points."
     }
-    completions = {}    
+
+    completions = {}
     for key, prompt in prompts.items():
-        completion = palm.generate_text(
-            model=model,
-            prompt=prompt,
-            temperature=0.1,
-            max_output_tokens=5000,
-        )
-        # Convert the markdown string to a list
+        response = model.generate_content(
+                prompt,
+                generation_config={"temperature": 0.1, "max_output_tokens": 5000}
+            )
+
         if key == 'modules':
-            # Replace bullet points with asterisks
-            markdown_string = completion.result.replace('•', '*') if completion.result else ""
-            completions[key] = markdown_to_list(markdown_string) if markdown_string else []
+            markdown_string = response.text.replace('•', '*') if response.text else ""
+            completions[key] = markdown_to_list(markdown_string)
         else:
-            completions[key] = markdown.markdown(completion.result) if completion.result else ""
+            completions[key] = markdown.markdown(response.text if response.text else "")
+    
     return completions
 
+def generate_module_content(course_name, module_name):
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash-002')
 
+        prompts = {
+            "module": f"Course Name: {course_name} Topic: {module_name}. Please provide a comprehensive explanation of {module_name}. Feel free to use examples or analogies to clarify complex ideas.",
+            "code": f"Course Name: {course_name} Topic: {module_name}. If the explanation of {module_name} requires code snippets for better understanding, please provide the relevant code snippets.",
+            "ascii": f"Course Name: {course_name} Topic: {module_name}. If the explanation of {module_name} requires diagram snippets for better understanding, please provide the relevant diagram snippets in the form of ASCII art."
+        }
 
+        results = {}
+        for key, prompt in prompts.items():
+            response = model.generate_content(
+                prompt,
+                generation_config={"temperature": 0.1, "max_output_tokens": 5000}
+            )
+            if response.candidates and response.candidates[0].content.parts:
+                results[key] = response.candidates[0].content.parts[0].text
 
-def generate_module_content(course_name,module_name):
-    palm.configure(api_key="AIzaSyAWMEx0ByKdMqvuWQSN4uBGNmvfyX88Fw0")
-    models = [
-        m for m in palm.list_models()
-        if 'generateText' in m.supported_generation_methods
-    ]
-    model = models[0].name
+            else:
+                print(f"⚠️ Skipped '{key}' content generation due to blocked output or missing parts.")
+                results[key] = ""
 
-    # First prompt for module content
-    module_prompt = f"Course Name: {course_name} Topic: {module_name}. Please provide a comprehensive explanation of {module_name}. Feel free to use examples or analogies to clarify complex ideas. Additionally, if there are specific aspects or questions you'd like to address within the topic, please mention them for a more focused response."
-    module_completion = palm.generate_text(
-        model=model,
-        prompt=module_prompt,
-        temperature=0.1,
-        max_output_tokens=5000,
-    )
-    module_content = module_completion.result if module_completion.result else ""
+        # Convert markdown content to HTML
+        module_content_html = md.convert(results["module"])
+        code_content_html = md.convert(results["code"])
+        ascii_content_html = md.convert(results["ascii"])
 
-    # Second prompt for code snippets
-    code_prompt = f"Course Name: {course_name} Topic: {module_name}. If the explanation of {module_name} requires code snippets for better understanding, please provide the relevant code snippets."
-    code_completion = palm.generate_text(
-        model=model,
-        prompt=code_prompt,
-        temperature=0.1,
-        max_output_tokens=5000,
-    )
-    code_content = code_completion.result if code_completion.result else ""
+        return f"{module_content_html}\n{code_content_html}\n{ascii_content_html}"
 
-    # Second prompt for ASCII art
-    ascii_prompt = f"Course Name: {course_name} Topic: {module_name}. If the explanation of {module_name} requires diagram snippets for better understanding, please provide the relevant diagram snippets in the form of ASCII art."
-    ascii_completion = palm.generate_text(
-        model=model,
-        prompt=ascii_prompt,
-        temperature=0.1,
-        max_output_tokens=5000,
-    )
-    ascii_content = ascii_completion.result if ascii_completion.result else ""
-
-    # Convert the markdown string to HTML, wrapping code snippets with <pre><code> tags
-    module_content_html = md.convert(module_content)
-    code_content_html = md.convert(code_content)
-    ascii_content_html = md.convert(ascii_content)
-
-    # Combine the module content and code snippets
-    combined_content = f"{module_content_html}\n{code_content_html}\n{ascii_content_html}"
-
-    return  combined_content
-
+    except Exception as e:
+        print(f"An error occurred while generating module content: {str(e)}")
+        return f"An error occurred: {str(e)}"
 
 
 
 def generate_recommendations(saved_courses):
     recommended_courses = []
-    palm.configure(api_key="YOUR-GEMINI-API-KEY")
-    models = [
-        m for m in palm.list_models()
-        if 'generateText' in m.supported_generation_methods
-    ]
-    model = models[0].name
+
     for course in saved_courses:
-        prompt = f"Based on the course {course.course_name}, please provide just a single course name at the top and a description for new recommended course that would be beneficial for the student to take next. The description should be concise and informative (less than 70 characters)."
-        new_course_name = palm.generate_text(
-            model=model,
-            prompt=prompt,
-            temperature=0.1,
-            max_output_tokens=70,
-        )
-        if new_course_name.result:
-            course_name = new_course_name.result.strip()
-            course_description = markdown.markdown(course_name)
-            recommended_courses.append({'name': course_name, 'description': course_description})
+        prompt = f"Based on the course '{course.course_name}', suggest one next course to take with a short (max 70 character) description."
+
+        response = model.generate_content(
+                prompt,
+                generation_config={"temperature": 0.1, "max_output_tokens": 5000}
+            )
+        if response.text:
+            lines = response.text.strip().split('\n', 1)
+            course_name = lines[0].strip()
+            description = markdown.markdown(lines[1].strip()) if len(lines) > 1 else ""
+            recommended_courses.append({'name': course_name, 'description': description})
+
     return recommended_courses
 
 
