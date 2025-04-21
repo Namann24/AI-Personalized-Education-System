@@ -149,7 +149,7 @@ def quiz():
         if given_answers:
             for i in range(min(len(actual_answers), len(given_answers))):
             # Extract the letter from the given answer (e.g., 'B) Firewall' -> 'B')
-                given_answer_letter = given_answers[i].split(')')[0].strip()  # Get the part before the closing parenthesis and strip whitespace
+                given_answer_letter = given_answers[i].split('.')[0].strip()  # Get the part before the closing parenthesis and strip whitespace
                 if actual_answers[i].lower() == given_answer_letter.lower():  # Case insensitive comparison
                     score += 1
 
